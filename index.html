@@ -1901,7 +1901,7 @@ function BtControls({btRunning,setBtRunning,replayMode,setReplayMode,replaySpeed
       <div style={{display:"flex",gap:"6px",alignItems:"center",background:PANEL,
         borderRadius:ctrlOpen?"8px 8px 0 0":"8px",border:`1px solid ${PURPLE}30`,
         padding:"5px 10px"}}>
-        <button onClick={()=>setBtRunning(r=>!r)} style={{padding:"4px 12px",borderRadius:"5px",
+        <button onClick={()=>{const next=!btRunning;rBtRunning.current=next;rRunning.current=next;setBtRunning(next);}} style={{padding:"4px 12px",borderRadius:"5px",
           background:btRunning?PURPLE+"22":PURPLE,border:`1px solid ${PURPLE}`,
           color:btRunning?PURPLE:TEXT,fontSize:"10px",fontWeight:"700",cursor:"pointer"}}>
           {btRunning?"⏸":"▶ Play"}
@@ -3614,16 +3614,21 @@ function App(){
 
   // ── BACKTEST AUTO-PLAY LOOP ──────────────────────────────────
   // Speed tiers (rReplaySpeed):
-  //   0   = TURBO   : 200 candles per rAF frame via MessageChannel micro-task
-  //   10  = MAX     : 1 candle per MessageChannel tick (~100-200/sec)
-  //   50  = Fast    : 1 candle per rAF frame (~60/sec)
-  //   500 = Normal  : 1 candle per setTimeout delay (real pace)
+  //   0   = TURBO   : 200 candles per rAF frame
+  //   10  = MAX     : 1 candle per MessageChannel micro-task (~100-200/sec)
+  //   50  = Fast    : 1 candle per rAF (~60/sec)
+  //   500 = Normal  : 1 candle per setTimeout (real pace)
+  //
+  // KEY FIX: do NOT use rBtRunning.current as the loop guard — it is synced
+  // by a separate useEffect that runs AFTER this one, so it is still false
+  // when the loop starts and immediately kills every iteration.
+  // Instead use `cancelled` (closure var set by the cleanup fn) to stop the
+  // loop. The effect only runs when btRunning===true, so that is the start gate.
   useEffect(()=>{
     if(mode!=="backtest"||!btRunning||btCandles.length===0)return;
     if(rReplayMode.current==="step")return;
 
-    // Sync ref immediately — the separate rBtRunning.current useEffect runs AFTER
-    // this one, so without this the loop reads stale false and bails immediately.
+    // Force-sync refs immediately so replayStep/processCandle guards pass
     rBtRunning.current=true;
     rRunning.current=true;
 
@@ -3631,42 +3636,47 @@ function App(){
     const mc=typeof MessageChannel!=="undefined"?new MessageChannel():null;
 
     const done=()=>{
-      rBtRunning.current=false;
-      rRunning.current=false;
-      setBtRunning(false);
-      setStatus("✅ Backtest complete · "+btCandles.length.toLocaleString()+" candles replayed");
+      if(!cancelled){
+        rBtRunning.current=false;
+        rRunning.current=false;
+        setBtRunning(false);
+        setStatus("✅ Backtest complete · "+btCandles.length.toLocaleString()+" candles replayed");
+      }
     };
 
     const loop=()=>{
-      if(cancelled||!rBtRunning.current)return;
+      if(cancelled)return;                          // paused/unmounted
       if(rBtIdx.current>=btCandles.length){done();return;}
       const spd=rReplaySpeed.current;
       const isSignalMode=rReplayMode.current==="signal";
 
       if(spd===0&&!isSignalMode){
+        // TURBO: batch 200 candles per frame
         let n=0;
-        while(n++<200&&rBtRunning.current&&rBtIdx.current<btCandles.length){
+        while(n++<200&&!cancelled&&rBtIdx.current<btCandles.length){
           if(!replayStep(btCandles)){done();return;}
         }
-        if(!rBtRunning.current||cancelled)return;
-        requestAnimationFrame(loop);
+        if(!cancelled)requestAnimationFrame(loop);
       }else if(spd<=10||isSignalMode){
+        // MAX / Signal
         if(!replayStep(btCandles)){done();return;}
-        if(!rBtRunning.current||cancelled)return;
+        if(cancelled)return;
         if(isSignalMode&&rTrade.current){
           setTimeout(loop,60);
         }else if(mc){
           mc.port1.onmessage=loop;
           mc.port2.postMessage(null);
-        }else requestAnimationFrame(loop);
+        }else{
+          requestAnimationFrame(loop);
+        }
       }else if(spd<=50){
+        // Fast
         if(!replayStep(btCandles)){done();return;}
-        if(!rBtRunning.current||cancelled)return;
-        requestAnimationFrame(loop);
+        if(!cancelled)requestAnimationFrame(loop);
       }else{
+        // Normal
         if(!replayStep(btCandles)){done();return;}
-        if(!rBtRunning.current||cancelled)return;
-        setTimeout(loop,spd);
+        if(!cancelled)setTimeout(loop,spd);
       }
     };
 
@@ -4446,12 +4456,7 @@ function App(){
               </div>
               {/* Controls row */}
               <div style={{display:"flex",gap:"6px",alignItems:"center"}}>
-                <button onClick={()=>{
-                  const next=!btRunning;
-                  rBtRunning.current=next;
-                  rRunning.current=next;
-                  setBtRunning(next);
-                }}
+                <button onClick={()=>{const next=!btRunning;rBtRunning.current=next;rRunning.current=next;setBtRunning(next);}}
                   style={{padding:"5px 14px",borderRadius:"6px",fontWeight:"700",fontSize:"11px",cursor:"pointer",
                     background:btRunning?PURPLE+"22":PURPLE,border:`1px solid ${PURPLE}`,color:btRunning?PURPLE:TEXT}}>
                   {btRunning?"⏸":"▶"}
@@ -4637,7 +4642,7 @@ function App(){
 
                     {/* Play controls */}
                     <div style={{display:"flex",gap:"6px",marginBottom:"8px"}}>
-                      <button onClick={()=>setBtRunning(r=>!r)}
+                      <button onClick={()=>{const next=!btRunning;rBtRunning.current=next;rRunning.current=next;setBtRunning(next);}}
                         style={{flex:1,padding:"9px",borderRadius:"7px",fontWeight:"700",fontSize:"11px",cursor:"pointer",
                           background:btRunning?PURPLE+"22":PURPLE,
                           border:`1px solid ${PURPLE}`,color:btRunning?PURPLE:TEXT}}>
@@ -4648,7 +4653,7 @@ function App(){
                           background:"transparent",border:`1px solid ${BORDER}`,color:MUTED}}>
                         ▶|
                       </button>
-                      <button onClick={()=>{setBtRunning(false);resetAllState(rStartBal.current,true);rBtIdx.current=50;setBtIdx(50);setCandles(btCandles.slice(0,50));setStatus("↺ Reset · Press ▶ Play to replay");}}
+                      <button onClick={()=>{rBtRunning.current=false;rRunning.current=false;setBtRunning(false);resetAllState(rStartBal.current,true);rBtIdx.current=50;setBtIdx(50);setCandles(btCandles.slice(0,50));setStatus("↺ Reset · Press ▶ Play to replay");}}
                         style={{padding:"9px 14px",borderRadius:"7px",fontSize:"11px",cursor:"pointer",
                           background:"transparent",border:`1px solid ${BORDER}`,color:MUTED}}>
                         ↺
